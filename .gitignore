@@ -1,5 +1,4 @@
-build/
+*.exe
 *.o
-*.cf
 *.ghw
-metricas.csv
+build/
