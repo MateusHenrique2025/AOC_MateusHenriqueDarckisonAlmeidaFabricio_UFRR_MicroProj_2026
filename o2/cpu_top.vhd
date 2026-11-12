@@ -1,4 +1,3 @@
-
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
@@ -78,6 +77,9 @@ architecture rtl of cpu_top is
     signal stall_if                  : std_logic;
     signal flush_id_ex               : std_logic;
 
+    -- NOVO: Contador de ciclos para o hazard_cycle
+    signal ciclo_atual : unsigned(31 downto 0) := (others => '0');
+
     -- Funcao para limpar sinais indefinidos
     function to_logic(v : std_logic) return std_logic is
     begin
@@ -90,54 +92,46 @@ architecture rtl of cpu_top is
 
 begin
 
+    -- NOVO PROCESSO: Contador de ciclos (conta apenas depois do reset)
+    process(clk)
+    begin
+        if rising_edge(clk) then
+            if rst = '1' then
+                ciclo_atual <= (others => '0');
+            elsif hazard_abort_int = '1' or to_logic(wb_ctrl_is_break) = '1' then
+                ciclo_atual <= ciclo_atual; -- Congela no aborto ou done
+            else
+                ciclo_atual <= ciclo_atual + 1;
+            end if;
+        end if;
+    end process;
+
     -- ================= IF =================
 
     pc_inst: entity work.pc
-        port map (
-            clk => clk,
-            rst => rst,
-            freeze => to_logic(stall_if or hazard_abort_int),
-            next_pc => next_pc,
-            pc_out => pc_out
-        );
+        port map (clk => clk, rst => rst, freeze => to_logic(stall_if or hazard_abort_int),
+                  next_pc => next_pc, pc_out => pc_out);
 
     imem_inst: entity work.imem
-        generic map (
-            PROG_FILE => PROG_FILE
-        )
-        port map (
-            addr => pc_out,
-            instr => instr_if
-        );
+        generic map (PROG_FILE => PROG_FILE)
+        port map (addr => pc_out, instr => instr_if);
 
     pc_plus4 <= std_logic_vector(unsigned(pc_out) + 4);
 
     next_pc <= branch_target_id
-        when (to_logic(ctrl_branch) = '1' and
-              to_logic(zero_id) = '1' and
-              to_logic(ctrl_is_break) = '0')
+        when (to_logic(ctrl_branch) = '1' and to_logic(zero_id) = '1' and to_logic(ctrl_is_break) = '0')
         else pc_plus4;
 
     if_id_inst: entity work.if_id
-        port map (
-            clk => clk,
-            rst => rst,
-            flush => '0',
-            stall => to_logic(stall_if or hazard_abort_int),
-            pc_in => pc_out,
-            instr_in => instr_if,
-            pc_out => pc_id,
-            instr_out => instr_id
-        );
+        port map (clk => clk, rst => rst, flush => '0', stall => to_logic(stall_if or hazard_abort_int),
+                  pc_in => pc_out, instr_in => instr_if, pc_out => pc_id, instr_out => instr_id);
 
     -- ================= ID =================
 
     process(instr_id)
     begin
         if is_x(instr_id) then
-            rs_addr <= "00000";
-            rt_addr <= "00000";
-            rd_addr <= "00000";
+            rs_addr <= "00000"; rt_addr <= "00000"; rd_addr <= "00000";
         else
             rs_addr <= instr_id(25 downto 21);
             rt_addr <= instr_id(20 downto 16);
@@ -146,216 +140,105 @@ begin
     end process;
 
     regfile_inst: entity work.regfile
-        port map (
-            clk => clk,
-            rst => rst,
-            reg_write => to_logic(wb_ctrl_reg_write),
-            rs_addr => rs_addr,
-            rt_addr => rt_addr,
-            rd_addr => wb_rd_addr,
-            write_data => write_data,
-            rs_data => rs_data,
-            rt_data => rt_data,
-            dbg_addr => dbg_reg_addr,
-            dbg_data => dbg_reg_data
-        );
+        port map (clk => clk, rst => rst, reg_write => to_logic(wb_ctrl_reg_write),
+                  rs_addr => rs_addr, rt_addr => rt_addr, rd_addr => wb_rd_addr,
+                  write_data => write_data, rs_data => rs_data, rt_data => rt_data,
+                  dbg_addr => dbg_reg_addr, dbg_data => dbg_reg_data);
 
     ctrl_inst: entity work.control
-        port map (
-            opcode => instr_id(31 downto 26),
-            funct => instr_id(5 downto 0),
-            reg_dst => ctrl_reg_dst,
-            alu_src => ctrl_alu_src,
-            mem_to_reg => ctrl_mem_to_reg,
-            reg_write => ctrl_reg_write,
-            mem_read => ctrl_mem_read,
-            mem_write => ctrl_mem_write,
-            branch => ctrl_branch,
-            alu_ctrl => ctrl_alu_ctrl,
-            is_break => ctrl_is_break
-        );
+        port map (opcode => instr_id(31 downto 26), funct => instr_id(5 downto 0),
+                  reg_dst => ctrl_reg_dst, alu_src => ctrl_alu_src, mem_to_reg => ctrl_mem_to_reg,
+                  reg_write => ctrl_reg_write, mem_read => ctrl_mem_read, mem_write => ctrl_mem_write,
+                  branch => ctrl_branch, alu_ctrl => ctrl_alu_ctrl, is_break => ctrl_is_break);
 
     imm_ext <= (31 downto 16 => instr_id(15)) & instr_id(15 downto 0);
 
-    -- CORRECAO: extensao de sinal com 14 bits + imediato de 16 bits + 2 zeros = 32 bits
     branch_target_id <= std_logic_vector(
-        unsigned(pc_id) +
-        unsigned((31 downto 18 => instr_id(15)) &
-                 instr_id(15 downto 0) & "00")
-    );
+        unsigned(pc_id) + unsigned((31 downto 18 => instr_id(15)) & instr_id(15 downto 0) & "00"));
 
     zero_id <= '1' when rs_data = rt_data else '0';
 
     id_ex_inst: entity work.id_ex
-        port map (
-            clk => clk,
-            rst => rst,
-            flush => to_logic(flush_id_ex),
-            stall => to_logic(stall_if or hazard_abort_int),
-            reg_write_in => to_logic(ctrl_reg_write),
-            mem_to_reg_in => to_logic(ctrl_mem_to_reg),
-            mem_read_in => to_logic(ctrl_mem_read),
-            mem_write_in => to_logic(ctrl_mem_write),
-            alu_src_in => to_logic(ctrl_alu_src),
-            reg_dst_in => to_logic(ctrl_reg_dst),
-            alu_ctrl_in => ctrl_alu_ctrl,
-            branch_in => to_logic(ctrl_branch),
-            is_break_in => to_logic(ctrl_is_break),
-            pc_in => pc_id,
-            rs_data_in => rs_data,
-            rt_data_in => rt_data,
-            imm_in => imm_ext,
-            rs_addr_in => rs_addr,
-            rt_addr_in => rt_addr,
-            rd_addr_in => rd_addr,
-            reg_write_out => ex_ctrl_reg_write,
-            mem_to_reg_out => ex_ctrl_mem_to_reg,
-            mem_read_out => ex_ctrl_mem_read,
-            mem_write_out => ex_ctrl_mem_write,
-            alu_src_out => ex_alu_src,
-            reg_dst_out => ex_reg_dst,
-            alu_ctrl_out => ex_alu_ctrl,
-            branch_out => ex_ctrl_branch,
-            is_break_out => ex_ctrl_is_break,
-            pc_out => ex_pc,
-            rs_data_out => ex_rs_data,
-            rt_data_out => ex_rt_data,
-            imm_out => ex_imm,
-            rs_addr_out => ex_rs_addr,
-            rt_addr_out => ex_rt_addr,
-            rd_addr_out => ex_rd_addr
-        );
+        port map (clk => clk, rst => rst, flush => to_logic(flush_id_ex), stall => to_logic(stall_if or hazard_abort_int),
+                  reg_write_in => to_logic(ctrl_reg_write), mem_to_reg_in => to_logic(ctrl_mem_to_reg),
+                  mem_read_in => to_logic(ctrl_mem_read), mem_write_in => to_logic(ctrl_mem_write),
+                  alu_src_in => to_logic(ctrl_alu_src), reg_dst_in => to_logic(ctrl_reg_dst), alu_ctrl_in => ctrl_alu_ctrl,
+                  branch_in => to_logic(ctrl_branch), is_break_in => to_logic(ctrl_is_break),
+                  pc_in => pc_id, rs_data_in => rs_data, rt_data_in => rt_data, imm_in => imm_ext,
+                  rs_addr_in => rs_addr, rt_addr_in => rt_addr, rd_addr_in => rd_addr,
+                  reg_write_out => ex_ctrl_reg_write, mem_to_reg_out => ex_ctrl_mem_to_reg,
+                  mem_read_out => ex_ctrl_mem_read, mem_write_out => ex_ctrl_mem_write,
+                  alu_src_out => ex_alu_src, reg_dst_out => ex_reg_dst, alu_ctrl_out => ex_alu_ctrl,
+                  branch_out => ex_ctrl_branch, is_break_out => ex_ctrl_is_break,
+                  pc_out => ex_pc, rs_data_out => ex_rs_data, rt_data_out => ex_rt_data, imm_out => ex_imm,
+                  rs_addr_out => ex_rs_addr, rt_addr_out => ex_rt_addr, rd_addr_out => ex_rd_addr);
 
     -- ================= EX =================
 
     process(ex_alu_src, ex_rt_data, ex_imm)
     begin
-        if is_x(ex_alu_src) then
-            alu_b <= (others => '0');
-        elsif ex_alu_src = '0' then
-            alu_b <= ex_rt_data;
-        else
-            alu_b <= ex_imm;
-        end if;
+        if is_x(ex_alu_src) then alu_b <= (others => '0');
+        elsif ex_alu_src = '0' then alu_b <= ex_rt_data;
+        else alu_b <= ex_imm; end if;
     end process;
 
     alu_inst: entity work.alu
-        port map (
-            a => ex_rs_data,
-            b => alu_b,
-            alu_ctrl => ex_alu_ctrl,
-            result => alu_result,
-            zero => open
-        );
+        port map (a => ex_rs_data, b => alu_b, alu_ctrl => ex_alu_ctrl, result => alu_result, zero => open);
 
     ex_wr_addr <= "00000" when is_x(ex_reg_dst) else
-                  ex_rd_addr when ex_reg_dst = '1' else
-                  ex_rt_addr;
+                  ex_rd_addr when ex_reg_dst = '1' else ex_rt_addr;
 
-    -- Blindagem total do EX/MEM
     ex_mem_inst: entity work.ex_mem
-        port map (
-            clk => clk,
-            rst => rst,
-            flush => '0',
-            stall => to_logic(hazard_abort_int),
-            reg_write_in => to_logic(ex_ctrl_reg_write),
-            mem_to_reg_in => to_logic(ex_ctrl_mem_to_reg),
-            mem_read_in => to_logic(ex_ctrl_mem_read),
-            mem_write_in => to_logic(ex_ctrl_mem_write),
-            branch_in => to_logic(ex_ctrl_branch),
-            is_break_in => to_logic(ex_ctrl_is_break),
-            alu_result_in => alu_result,
-            rt_data_in => ex_rt_data,
-            rd_addr_in => ex_wr_addr,
-            pc_in => ex_pc,
-            reg_write_out => mem_ctrl_reg_write,
-            mem_to_reg_out => mem_ctrl_mem_to_reg,
-            mem_read_out => mem_ctrl_mem_read,
-            mem_write_out => mem_ctrl_mem_write,
-            branch_out => mem_ctrl_branch,
-            is_break_out => mem_ctrl_is_break,
-            alu_result_out => mem_alu_result,
-            rt_data_out => mem_rt_data,
-            rd_addr_out => mem_rd_addr,
-            pc_out => open
-        );
+        port map (clk => clk, rst => rst, flush => '0', stall => to_logic(hazard_abort_int),
+                  reg_write_in => to_logic(ex_ctrl_reg_write), mem_to_reg_in => to_logic(ex_ctrl_mem_to_reg),
+                  mem_read_in => to_logic(ex_ctrl_mem_read), mem_write_in => to_logic(ex_ctrl_mem_write),
+                  branch_in => to_logic(ex_ctrl_branch), is_break_in => to_logic(ex_ctrl_is_break),
+                  alu_result_in => alu_result, rt_data_in => ex_rt_data, rd_addr_in => ex_wr_addr, pc_in => ex_pc,
+                  reg_write_out => mem_ctrl_reg_write, mem_to_reg_out => mem_ctrl_mem_to_reg,
+                  mem_read_out => mem_ctrl_mem_read, mem_write_out => mem_ctrl_mem_write,
+                  branch_out => mem_ctrl_branch, is_break_out => mem_ctrl_is_break,
+                  alu_result_out => mem_alu_result, rt_data_out => mem_rt_data,
+                  rd_addr_out => mem_rd_addr, pc_out => open);
 
     -- ================= MEM =================
 
     dmem_inst: entity work.dmem
-        port map (
-            clk => clk,
-            rst => rst,
-            mem_read => to_logic(mem_ctrl_mem_read),
-            mem_write => to_logic(mem_ctrl_mem_write),
-            addr => mem_alu_result,
-            write_data => mem_rt_data,
-            read_data => dmem_read
-        );
+        port map (clk => clk, rst => rst, mem_read => to_logic(mem_ctrl_mem_read), mem_write => to_logic(mem_ctrl_mem_write),
+                  addr => mem_alu_result, write_data => mem_rt_data, read_data => dmem_read);
 
-    -- Blindagem total do MEM/WB
     mem_wb_inst: entity work.mem_wb
-        port map (
-            clk => clk,
-            rst => rst,
-            flush => '0',
-            stall => to_logic(hazard_abort_int),
-            reg_write_in => to_logic(mem_ctrl_reg_write),
-            mem_to_reg_in => to_logic(mem_ctrl_mem_to_reg),
-            is_break_in => to_logic(mem_ctrl_is_break),
-            alu_result_in => mem_alu_result,
-            mem_data_in => dmem_read,
-            rd_addr_in => mem_rd_addr,
-            reg_write_out => wb_ctrl_reg_write,
-            mem_to_reg_out => wb_ctrl_mem_to_reg,
-            is_break_out => wb_ctrl_is_break,
-            alu_result_out => wb_alu_result,
-            mem_data_out => wb_dmem_read,
-            rd_addr_out => wb_rd_addr
-        );
+        port map (clk => clk, rst => rst, flush => '0', stall => to_logic(hazard_abort_int),
+                  reg_write_in => to_logic(mem_ctrl_reg_write), mem_to_reg_in => to_logic(mem_ctrl_mem_to_reg),
+                  is_break_in => to_logic(mem_ctrl_is_break),
+                  alu_result_in => mem_alu_result, mem_data_in => dmem_read, rd_addr_in => mem_rd_addr,
+                  reg_write_out => wb_ctrl_reg_write, mem_to_reg_out => wb_ctrl_mem_to_reg,
+                  is_break_out => wb_ctrl_is_break,
+                  alu_result_out => wb_alu_result, mem_data_out => wb_dmem_read, rd_addr_out => wb_rd_addr);
 
     -- ================= WB =================
 
-    write_data <= wb_dmem_read
-        when to_logic(wb_ctrl_mem_to_reg) = '1'
-        else wb_alu_result;
+    write_data <= wb_dmem_read when to_logic(wb_ctrl_mem_to_reg) = '1' else wb_alu_result;
 
     -- ================= HAZARD & SAIDAS =================
 
     hazard_inst: entity work.hazard_unit
-        port map (
-            rs_addr_id => rs_addr,
-            rt_addr_id => rt_addr,
-            reg_write_ex => to_logic(ex_ctrl_reg_write),
-            rd_addr_ex => ex_wr_addr,
-            mem_read_ex => to_logic(ex_ctrl_mem_read),
-            reg_write_mem => to_logic(mem_ctrl_reg_write),
-            rd_addr_mem => mem_rd_addr,
-            branch_id => to_logic(ctrl_branch),
-            zero_ex => to_logic(zero_id),
-            mem_unificada => MEM_UNIFICADA,
-            mem_read_ex_b => to_logic(ex_ctrl_mem_read),
-            hazard_abort => hazard_abort_int,
-            hazard_type => hazard_type_int,
-            stall_if => stall_if,
-            flush_id_ex => flush_id_ex
-        );
+        port map (rs_addr_id => rs_addr, rt_addr_id => rt_addr,
+                  reg_write_ex => to_logic(ex_ctrl_reg_write), rd_addr_ex => ex_wr_addr, mem_read_ex => to_logic(ex_ctrl_mem_read),
+                  reg_write_mem => to_logic(mem_ctrl_reg_write), rd_addr_mem => mem_rd_addr,
+                  branch_id => to_logic(ctrl_branch), zero_ex => to_logic(zero_id),
+                  mem_unificada => MEM_UNIFICADA, mem_read_ex_b => to_logic(ex_ctrl_mem_read),
+                  hazard_abort => hazard_abort_int, hazard_type => hazard_type_int,
+                  stall_if => stall_if, flush_id_ex => flush_id_ex);
 
     hazard_abort <= to_logic(hazard_abort_int);
     hazard_type  <= hazard_type_int;
     hazard_pc    <= pc_id;
-    hazard_cycle <= (others => '0');
+    hazard_cycle <= ciclo_atual; -- Ligado ao contador novo
 
     done <= to_logic(wb_ctrl_is_break);
 
-    retired <= "01"
-        when to_logic(wb_ctrl_reg_write) = '1' or
-             to_logic(wb_ctrl_mem_to_reg) = '1'
-        else "00";
+    retired <= "01" when to_logic(wb_ctrl_reg_write) = '1' or to_logic(wb_ctrl_mem_to_reg) = '1' else "00";
 
-    stage_valid <= "0000000001"
-        when to_logic(wb_ctrl_reg_write) = '1'
-        else "0000000000";
+    stage_valid <= "0000000001" when to_logic(wb_ctrl_reg_write) = '1' else "0000000000";
 
 end architecture;
