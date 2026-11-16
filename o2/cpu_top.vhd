@@ -97,7 +97,7 @@ begin
     begin
         if rising_edge(clk) then
             if rst = '1' then
-                ciclo_atual <= (others => '1');
+                ciclo_atual <= to_unsigned(1, 32);
             elsif hazard_abort_int = '1' or to_logic(wb_ctrl_is_break) = '1' then
                 ciclo_atual <= ciclo_atual; -- Congela no aborto ou done
             else
