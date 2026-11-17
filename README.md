@@ -6,4 +6,4 @@ Integrantes: ¹ Darckison Almeida , ² Fabrício Cauã , ³ Mateus Henrique Pinh
 o1/ (monociclo), o2/ (pipeline), tb/ (testbench), tracos/ (programas), scripts/ (automação)
 
 ## Como reproduzir
-(a preencher: comando único)
+./run_all.sh
