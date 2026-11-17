@@ -81,7 +81,7 @@ begin
         -- 3.3 Desfecho: aborto, fim normal ou tempo esgotado
         if hazard_abort = '1' then
             report ORG_NOME & ": ABORTO tipo=" & to_string(hazard_type) &
-                   " pc=0x" & to_string(hazard_pc) &
+                   " pc=0x" & to_hstring(hazard_pc) &
                    " ciclo=" & integer'image(to_integer(hazard_cycle));
             assert ESPERA_ABORTO report "Aborto inesperado: o traço deveria ser livre de conflitos" severity error;
             assert to_integer(unsigned(hazard_type)) = TIPO_ESPERADO report "Tipo de conflito diferente do esperado" severity error;

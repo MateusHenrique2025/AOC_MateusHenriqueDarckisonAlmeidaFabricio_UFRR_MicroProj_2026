@@ -77,8 +77,9 @@ architecture rtl of cpu_top is
     signal stall_if                  : std_logic;
     signal flush_id_ex               : std_logic;
 
-    -- NOVO: Contador de ciclos para o hazard_cycle
+    -- Contadores e Validade
     signal ciclo_atual : unsigned(31 downto 0) := (others => '0');
+    signal val_id, val_ex, val_mem, val_wb : std_logic := '0';
 
     -- Funcao para limpar sinais indefinidos
     function to_logic(v : std_logic) return std_logic is
@@ -102,6 +103,21 @@ begin
                 ciclo_atual <= ciclo_atual; -- Congela no aborto ou done
             else
                 ciclo_atual <= ciclo_atual + 1;
+            end if;
+        end if;
+    end process;
+
+    -- NOVO PROCESSO: Pipeline de Validade
+    process(clk)
+    begin
+        if rising_edge(clk) then
+            if rst = '1' then
+                val_id <= '0'; val_ex <= '0'; val_mem <= '0'; val_wb <= '0';
+            elsif hazard_abort_int = '0' and to_logic(wb_ctrl_is_break) = '0' then
+                val_id <= '1';         -- IF está sempre buscando em execução normal
+                val_ex <= val_id;
+                val_mem <= val_ex;
+                val_wb <= val_mem;
             end if;
         end if;
     end process;
@@ -232,13 +248,18 @@ begin
 
     hazard_abort <= to_logic(hazard_abort_int);
     hazard_type  <= hazard_type_int;
-    hazard_pc    <= pc_id;
-    hazard_cycle <= ciclo_atual; -- Ligado ao contador novo
+    
+    -- CORREÇÃO: Hazard Estrutural aponta para a instrução mais nova (estágio IF = pc_out)
+    hazard_pc    <= pc_out when hazard_type_int = "10" else pc_id; 
+    
+    hazard_cycle <= ciclo_atual;
 
     done <= to_logic(wb_ctrl_is_break);
 
-    retired <= "01" when to_logic(wb_ctrl_reg_write) = '1' or to_logic(wb_ctrl_mem_to_reg) = '1' else "00";
+    -- CORREÇÃO: Instrução aposentada se for válida e não for break
+    retired <= "01" when val_wb = '1' and to_logic(wb_ctrl_is_break) = '0' else "00";
 
-    stage_valid <= "0000000001" when to_logic(wb_ctrl_reg_write) = '1' else "0000000000";
+    -- CORREÇÃO: Ocupação reflete a validade de cada estágio
+    stage_valid <= "00000" & val_wb & val_mem & val_ex & val_id & '1';
 
 end architecture;
